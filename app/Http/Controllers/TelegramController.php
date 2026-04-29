@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class TelegramController extends Controller
 {
@@ -15,32 +16,38 @@ class TelegramController extends Controller
     {
         $data = $request->all();
 
-        // التأكد من أن الطلب يحتوي على بيانات
-        if (!$data) return response()->json(['status' => 'no data']);
-
-        // 1. التعامل مع الأزرار
-        if (isset($data['callback_query'])) {
-            $chatId = $data['callback_query']['message']['chat']['id'];
-            $callbackData = $data['callback_query']['data'];
-            $this->handleButtons($chatId, $callbackData);
-        } 
-        
-        // 2. التعامل مع الرسائل
-        elseif (isset($data['message'])) {
-            $message = $data['message'];
-            $chatId = $message['chat']['id'];
-            $text = $message['text'] ?? '';
-
-            if ($text == '/start') {
-                Cache::forget("user_state_{$chatId}");
-                $this->sendFireWelcome($chatId);
+        try {
+            // 1. معالجة الضغط على الأزرار
+            if (isset($data['callback_query'])) {
+                $chatId = $data['callback_query']['message']['chat']['id'] ?? null;
+                $callbackData = $data['callback_query']['data'] ?? null;
+                if ($chatId && $callbackData) {
+                    $this->handleButtons($chatId, $callbackData);
+                }
             } 
-            elseif ($chatId == $this->adminChatId && str_starts_with($text, 'reply:')) {
-                $this->processAdminReply($text);
-            } 
-            else {
-                $this->forwardEverythingToAdmin($chatId, $message);
+            
+            // 2. معالجة الرسائل العادية
+            elseif (isset($data['message'])) {
+                $message = $data['message'];
+                $chatId = $message['chat']['id'] ?? null;
+                $text = $message['text'] ?? '';
+
+                if (!$chatId) return response()->json(['status' => 'no chat id']);
+
+                if ($text == '/start') {
+                    Cache::forget("user_state_{$chatId}");
+                    $this->sendFireWelcome($chatId);
+                } 
+                elseif ($chatId == $this->adminChatId && str_starts_with($text, 'reply:')) {
+                    $this->processAdminReply($text);
+                } 
+                else {
+                    $this->forwardEverythingToAdmin($chatId, $message);
+                }
             }
+        } catch (\Exception $e) {
+            // تسجيل الخطأ في اللوج لتعرف سببه لاحقاً
+            Log::error("Telegram Bot Error: " . $e->getMessage());
         }
         
         return response()->json(['status' => 'success']);
@@ -52,20 +59,19 @@ class TelegramController extends Controller
 
         $selectedSection = Cache::get("user_state_{$studentId}", "غير محدد");
         
-        // رسالة تأكيد للطالب
-        $this->sendRequest($studentId, "✅ **وصلت رسالتك!**\nالمهندس فادي يراجع طلبك الآن.. ثواني وبيرد عليك. ⏳");
+        // إشعار للطالب
+        $this->sendRequest($studentId, "✅ **وصلت رسالتك!**\nالمهندس فادي يراجع طلبك الآن.. ⏳");
 
-        // تحديد نوع الرسالة
-        $caption = $message['text'] ?? ($message['caption'] ?? 'بدون نص');
+        // استخراج النص أو الكابشن (لأنه في الصور لا يوجد text بل يوجد caption)
+        $userInput = $message['text'] ?? ($message['caption'] ?? 'أرسل مرفق (صورة/ملف)');
         
-        $adminNotice = "🚀 **طلب جديد من قسم [$selectedSection]**\n"
+        $adminNotice = "🚀 **طلب جديد [$selectedSection]**\n"
                      . "👤 **ID الطالب:** `{$studentId}`\n"
-                     . "📝 **المحتوى:** {$caption}";
+                     . "📝 **المحتوى:** {$userInput}";
 
-        // إرسال الإشعار للأدمن
         $this->sendRequest($this->adminChatId, $adminNotice);
 
-        // إذا كانت الرسالة ليست نصاً فقط (صورة، ملف، فيديو..) يتم توجيهها للأدمن
+        // إذا أرسل المستخدم صورة أو ملف (أي شيء ليس نصاً صرفاً)
         if (!isset($message['text'])) {
             $this->forwardMedia($this->adminChatId, $studentId, $message['message_id']);
         }
@@ -78,17 +84,17 @@ class TelegramController extends Controller
 
         if ($data == 'p_hw') {
             $section = "الواجبات";
-            $response = "📥 **أرسل تفاصيل واجبك الآن (صورة أو نص)** وسيرد المهندس فادي عليك فوراً! ⚡";
+            $response = "📥 **أرسل تفاصيل واجبك الآن (صورة أو نص)**..";
         } elseif ($data == 'p_ex') {
             $section = "الاختبارات";
-            $response = "📥 **أرسل اسم المادة والموعد هلقيت**.. ودع الباقي للمهندسين! 🎯";
+            $response = "📥 **أرسل اسم المادة والموعد هلقيت**..";
         } elseif ($data == 'p_pr') {
             $section = "المشاريع";
-            $response = "📥 **أرسل ملف المتطلبات هان.. ونحن لها!** 🛠️";
+            $response = "📥 **أرسل ملف المتطلبات هان**..";
         }
 
         if ($section) Cache::put("user_state_{$chatId}", $section, 3600);
-        $this->sendRequest($chatId, $response);
+        if ($response) $this->sendRequest($chatId, $response);
     }
 
     private function forwardMedia($to, $from, $msgId)
@@ -102,11 +108,7 @@ class TelegramController extends Controller
 
     private function sendRequest($chatId, $text, $buttons = null)
     {
-        $payload = [
-            'chat_id' => $chatId,
-            'text' => $text,
-            'parse_mode' => 'Markdown'
-        ];
+        $payload = ['chat_id' => $chatId, 'text' => $text, 'parse_mode' => 'Markdown'];
         if ($buttons) $payload['reply_markup'] = $buttons;
 
         Http::withoutVerifying()->post("https://api.telegram.org/bot{$this->token}/sendMessage", $payload);
@@ -114,7 +116,7 @@ class TelegramController extends Controller
 
     private function sendFireWelcome($chatId)
     {
-        $msg = "🎓 **UniTask | رفيقك نحو الامتياز**\n\n👇 **اختر وجهتك الآن وباشر بالإنجاز:**";
+        $msg = "🎓 **UniTask**\n\n👇 **اختر وجهتك الآن:**";
         $buttons = ['inline_keyboard' => [
             [['text' => '📚 قسم الواجبات', 'callback_data' => 'p_hw']],
             [['text' => '📝 قسم الاختبارات', 'callback_data' => 'p_ex']],
