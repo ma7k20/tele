@@ -15,6 +15,9 @@ class TelegramController extends Controller
     {
         $data = $request->all();
 
+        // التأكد من أن الطلب يحتوي على بيانات
+        if (!$data) return response()->json(['status' => 'no data']);
+
         // 1. التعامل مع الأزرار
         if (isset($data['callback_query'])) {
             $chatId = $data['callback_query']['message']['chat']['id'];
@@ -22,21 +25,21 @@ class TelegramController extends Controller
             $this->handleButtons($chatId, $callbackData);
         } 
         
-        // 2. التعامل مع الرسائل (نصوص، صور، ملفات)
+        // 2. التعامل مع الرسائل
         elseif (isset($data['message'])) {
-            $chatId = $data['message']['chat']['id'];
-            $text = $data['message']['text'] ?? '';
+            $message = $data['message'];
+            $chatId = $message['chat']['id'];
+            $text = $message['text'] ?? '';
 
             if ($text == '/start') {
                 Cache::forget("user_state_{$chatId}");
                 $this->sendFireWelcome($chatId);
             } 
-            elseif ($chatId == $this->adminChatId && str_contains($text, 'reply:')) {
+            elseif ($chatId == $this->adminChatId && str_starts_with($text, 'reply:')) {
                 $this->processAdminReply($text);
             } 
             else {
-                // تمرير كل شيء للأدمن (نص، صورة، ملف..)
-                $this->forwardEverythingToAdmin($chatId, $data['message']);
+                $this->forwardEverythingToAdmin($chatId, $message);
             }
         }
         
@@ -49,27 +52,23 @@ class TelegramController extends Controller
 
         $selectedSection = Cache::get("user_state_{$studentId}", "غير محدد");
         
-        // إخبار الطالب باستلام طلبه
+        // رسالة تأكيد للطالب
         $this->sendRequest($studentId, "✅ **وصلت رسالتك!**\nالمهندس فادي يراجع طلبك الآن.. ثواني وبيرد عليك. ⏳");
 
-        // تحديد نوع المحتوى المكتوب في رسالة الإشعار للأدمن
-        $type = "نصية";
-        if (isset($message['photo'])) $type = "صورة 🖼️";
-        if (isset($message['document'])) $type = "ملف 📄";
-        if (isset($message['voice'])) $type = "بصمة صوت 🎤";
+        // تحديد نوع الرسالة
+        $caption = $message['text'] ?? ($message['caption'] ?? 'بدون نص');
+        
+        $adminNotice = "🚀 **طلب جديد من قسم [$selectedSection]**\n"
+                     . "👤 **ID الطالب:** `{$studentId}`\n"
+                     . "📝 **المحتوى:** {$caption}";
 
-        $adminNotice = "🚀 **طلب جديد (من $selectedSection)**\n"
-                     . "👤 **الطالب:** `{$studentId}`\n"
-                     . "📦 **النوع:** {$type}\n"
-                     . "📝 **المحتوى:** " . ($message['text'] ?? ($message['caption'] ?? 'بدون نص')) . "\n\n"
-                     . "👇 **للرد:**\n"
-                     . "`reply:{$studentId}:نص الرد`";
-
-        // 1. إرسال الإشعار النصي للأدمن أولاً
+        // إرسال الإشعار للأدمن
         $this->sendRequest($this->adminChatId, $adminNotice);
 
-        // 2. إعادة توجيه المرفق للأدمن (Forward) لكي يراه بوضوح
-        $this->forwardMedia($this->adminChatId, $studentId, $message['message_id']);
+        // إذا كانت الرسالة ليست نصاً فقط (صورة، ملف، فيديو..) يتم توجيهها للأدمن
+        if (!isset($message['text'])) {
+            $this->forwardMedia($this->adminChatId, $studentId, $message['message_id']);
+        }
     }
 
     private function handleButtons($chatId, $data)
@@ -85,14 +84,13 @@ class TelegramController extends Controller
             $response = "📥 **أرسل اسم المادة والموعد هلقيت**.. ودع الباقي للمهندسين! 🎯";
         } elseif ($data == 'p_pr') {
             $section = "المشاريع";
-            $response = "📥 **أرسل ملف المتطلبات (Requirements) هان.. ونحن لها!** 🛠️";
+            $response = "📥 **أرسل ملف المتطلبات هان.. ونحن لها!** 🛠️";
         }
 
         if ($section) Cache::put("user_state_{$chatId}", $section, 3600);
         $this->sendRequest($chatId, $response);
     }
 
-    // وظيفة خاصة لإرسال المرفقات للأدمن (صورة، ملف، إلخ)
     private function forwardMedia($to, $from, $msgId)
     {
         Http::withoutVerifying()->post("https://api.telegram.org/bot{$this->token}/forwardMessage", [
@@ -104,12 +102,14 @@ class TelegramController extends Controller
 
     private function sendRequest($chatId, $text, $buttons = null)
     {
-        Http::withoutVerifying()->post("https://api.telegram.org/bot{$this->token}/sendMessage", [
+        $payload = [
             'chat_id' => $chatId,
             'text' => $text,
-            'parse_mode' => 'Markdown',
-            'reply_markup' => $buttons
-        ]);
+            'parse_mode' => 'Markdown'
+        ];
+        if ($buttons) $payload['reply_markup'] = $buttons;
+
+        Http::withoutVerifying()->post("https://api.telegram.org/bot{$this->token}/sendMessage", $payload);
     }
 
     private function sendFireWelcome($chatId)
