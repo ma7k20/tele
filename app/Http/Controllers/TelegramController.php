@@ -15,32 +15,34 @@ class TelegramController extends Controller
     {
         $data = $request->all();
 
-        // تجنب انهيار السيرفر في حال كان الطلب فارغاً
         if (!$data) return response()->json(['status' => 'no data']);
 
         try {
-            // 1. التعامل مع الأزرار
+            // 1. التعامل مع الأزرار (Callback Queries)
             if (isset($data['callback_query'])) {
                 $chatId = $data['callback_query']['message']['chat']['id'];
                 $callbackData = $data['callback_query']['data'];
                 $this->handleButtons($chatId, $callbackData);
             } 
             
-            // 2. التعامل مع الرسائل
+            // 2. التعامل مع الرسائل (Messages)
             elseif (isset($data['message'])) {
                 $chatId = $data['message']['chat']['id'];
                 $text = $data['message']['text'] ?? $data['message']['caption'] ?? '';
 
                 if ($text == '/start') {
                     $this->sendFireWelcome($chatId);
-                } elseif ($chatId == $this->adminChatId && str_starts_with($text, 'reply:')) {
+                } 
+                // معالجة رد الأدمن السريع
+                elseif ($chatId == $this->adminChatId && str_starts_with($text, 'reply:')) {
                     $this->processAdminReply($text);
-                } else {
+                } 
+                // توجيه رسائل الطلاب للأدمن
+                else {
                     $this->forwardToAdmin($chatId, $data['message']);
                 }
             }
         } catch (\Exception $e) {
-            // تسجيل الخطأ داخلياً دون إظهار 500 لتيليجرام
             Log::error("Telegram Bot Error: " . $e->getMessage());
         }
 
@@ -49,15 +51,15 @@ class TelegramController extends Controller
 
     private function sendFireWelcome($chatId)
     {
-        $msg = "🎓 **UniTask | رفيقك نحو الامتياز**\n\n"
-             . "أهلاً بك يا بطل! نحن لا نحل الواجبات فقط، بل نؤمن لك طريق الوصول لـ **+A** بكل سهولة. 🔥\n\n"
-             . "👇 **اختر وجهتك الآن وباشر بالإنجاز:**";
+        $msg = "🎓 **أهلاً بك في UniTask | مساعدك الأكاديمي**\n\n"
+             . "أنا هنا لأخفف عنك ضغط الدراسة وأضمن لك الدرجة الكاملة بإذن الله. ✨\n\n"
+             . "👇 **ماذا نحجز لك اليوم؟**";
 
         $buttons = [
             'inline_keyboard' => [
-                [['text' => '📚 قسم الواجبات', 'callback_data' => 'p_hw']],
-                [['text' => '📝 قسم الاختبارات', 'callback_data' => 'p_ex']],
-                [['text' => '💻 المشاريع البرمجية', 'callback_data' => 'p_pr']],
+                [['text' => '📚 حل واجبات', 'callback_data' => 'p_hw'], ['text' => '📝 اختبارات (كويزات)', 'callback_data' => 'p_ex']],
+                [['text' => '💻 مشاريع برمجية', 'callback_data' => 'p_pr']],
+                [['text' => '📞 تواصل مباشر مع المهندس', 'url' => 'https://t.me/fadi_alaa']] // رابط حسابك الشخصي مباشرة
             ]
         ];
         $this->sendRequest($chatId, $msg, $buttons);
@@ -67,35 +69,37 @@ class TelegramController extends Controller
     {
         $msg = "";
         if ($data == 'p_hw') {
-            $msg = "🔥 **قسم الواجبات:**\n💸 السعر: **10 - 20 شيكل**.\n📥 **أرسل التفاصيل الآن!**";
+            $msg = "📝 **قسم الواجبات:**\n\nيرجى إرسال ملف الواجب أو تصوير الأسئلة بوضوح.\n💰 السعر التقريبي: **10 - 25 شيكل** حسب الصعوبة.";
         } elseif ($data == 'p_ex') {
-            $msg = "⚡ **قسم الاختبارات:**\n🔹 كويز: **10** | نصفي: **15** | نهائي: **20**\n📥 **أرسل المادة والموعد!**";
+            $msg = "⚡ **قسم الاختبارات:**\n\nأرسل لنا (المادة، الوقت، ونماذج سابقة إن وجد).\n🔹 كويز: **10** | نصفي: **20** | نهائي: **30+**";
         } elseif ($data == 'p_pr') {
-            $msg = "💻 **قسم المشاريع:**\n💰 السعر: **10 - 80 شيكل**.\n📥 **أرسل المتطلبات هان!**";
+            $msg = "💻 **المشاريع الهندسية والبرمجية:**\n\nأرسل ملف المتطلبات (Requirements) وسنقوم بمراجعته فوراً.\n💰 السعر: يحدد بعد المعاينة.";
         }
         
-        $this->sendRequest($chatId, $msg);
+        $this->sendRequest($chatId, "✅ تم اختيار القسم.\n\n" . $msg . "\n\n📥 **أنا بانتظار ملفاتك الآن..**");
     }
 
     private function forwardToAdmin($studentId, $message)
     {
         if ($studentId == $this->adminChatId) return;
 
-        $text = $message['text'] ?? $message['caption'] ?? '(مرفق ميديا)';
+        $text = $message['text'] ?? $message['caption'] ?? '(مرفق ميديا أو ملف)';
 
-        // رسالة للطالب
-        $this->sendRequest($studentId, "✅ **تم استلام طلبك!**\nالمهندس فادي يراجع طلبك الآن. ⏳");
+        // تأكيد الاستلام للطالب
+        $this->sendRequest($studentId, "⏳ **جاري المعالجة..**\n\nتم إرسال طلبك للمهندس فادي بنجاح. سيصلك الرد هنا مع السعر خلال دقائق قليلة.");
 
-        // رسالة للأدمن
-        $adminNotice = "🚀 **طلب جديد من طالب**\n"
-                     . "👤 **ID:** `{$studentId}`\n"
-                     . "📝 **الوصف:** {$text}\n\n"
-                     . "👇 **للرد:**\n"
-                     . "`reply:{$studentId}:نص الرد`";
+        // إشعار للأدمن بتنسيق جديد يسهل الفصل بين المستخدمين
+        $adminNotice = "🔔 **طلب جديد وصلك!**\n"
+                     . "────────────────\n"
+                     . "👤 **ID الطالب:** `{$studentId}`\n"
+                     . "💬 **الوصف:** {$text}\n"
+                     . "────────────────\n"
+                     . "👇 **للرد السريع (انسخ القالب بالضغط عليه):**\n\n"
+                     . "`reply:{$studentId}:أهلاً بك، تكلفة الحل هي .. شيكل. هل نعتمد؟`";
 
         $this->sendRequest($this->adminChatId, $adminNotice);
 
-        // إعادة توجيه أي صورة أو ملف للأدمن فوراً
+        // توجيه الميديا (صور/ملفات) للأدمن
         if (!isset($message['text'])) {
             Http::withoutVerifying()->post("https://api.telegram.org/bot{$this->token}/forwardMessage", [
                 'chat_id' => $this->adminChatId,
@@ -107,17 +111,36 @@ class TelegramController extends Controller
 
     private function processAdminReply($text)
     {
+        // تقسيم النص بناءً على ":" مع مراعاة وجود نص الرد الذي قد يحتوي على ":"
         $parts = explode(':', $text, 3);
+        
         if (count($parts) === 3) {
-            $this->sendRequest(trim($parts[1]), "👨‍🏫 **رد من المهندس:**\n\n" . trim($parts[2]));
-            $this->sendRequest($this->adminChatId, "✅ تم إرسال الرد.");
+            $targetStudentId = trim($parts[1]);
+            $replyMessage = trim($parts[2]);
+
+            $status = $this->sendRequest($targetStudentId, "👨‍🏫 **رد من المهندس فادي:**\n\n" . $replyMessage);
+            
+            if ($status) {
+                $this->sendRequest($this->adminChatId, "✅ تم إرسال الرد للطالب (`$targetStudentId`) بنجاح.");
+            } else {
+                $this->sendRequest($this->adminChatId, "❌ فشل إرسال الرد. تأكد من أن الطالب لم يقم بحظر البوت.");
+            }
         }
     }
 
     private function sendRequest($chatId, $text, $buttons = null)
     {
-        $payload = ['chat_id' => $chatId, 'text' => $text, 'parse_mode' => 'Markdown'];
+        $payload = [
+            'chat_id' => $chatId,
+            'text' => $text,
+            'parse_mode' => 'Markdown',
+            'disable_web_page_preview' => true
+        ];
+        
         if ($buttons) $payload['reply_markup'] = $buttons;
-        Http::withoutVerifying()->post("https://api.telegram.org/bot{$this->token}/sendMessage", $payload);
+
+        $response = Http::withoutVerifying()->post("https://api.telegram.org/bot{$this->token}/sendMessage", $payload);
+        
+        return $response->successful();
     }
 }
